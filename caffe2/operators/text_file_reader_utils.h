@@ -25,7 +25,7 @@ class TokenizedString {
   const std::vector<Token>& tokens() const {
     return tokens_;
   }
-  const int lastDelim() const {
+  int lastDelim() const {
     return lastDelim_;
   }
   friend class Tokenizer;
@@ -37,7 +37,7 @@ class Tokenizer {
   // state of the tokenizer
   std::string leftover_;
   // if we need to skip the first characters of the next batch because
-  // e.g. a escape char that was the last character of the last batch.
+  // e.g. an escape char that was the last character of the last batch.
   int toBeSkipped_;
   int delimTable_[256];
   const char escape_;

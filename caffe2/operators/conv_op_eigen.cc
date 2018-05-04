@@ -2,6 +2,12 @@
 #include "caffe2/core/operator.h"
 #include "caffe2/operators/conv_pool_op_base.h"
 
+#include "Eigen/Core"
+
+#if !EIGEN_VERSION_AT_LEAST(3, 3, 0)
+#error "Caffe2 requires Eigen to be at least 3.3.0.";
+#endif
+
 #include "unsupported/Eigen/CXX11/Tensor"
 
 namespace caffe2 {
@@ -207,5 +213,8 @@ bool EigenConvOp<T>::RunOnDeviceWithOrderNHWC() {
 }
 
 REGISTER_CPU_OPERATOR_WITH_ENGINE(Conv, EIGEN, EigenConvOp<float>);
+REGISTER_CPU_OPERATOR_WITH_ENGINE(Conv1D, EIGEN, EigenConvOp<float>);
+REGISTER_CPU_OPERATOR_WITH_ENGINE(Conv2D, EIGEN, EigenConvOp<float>);
+REGISTER_CPU_OPERATOR_WITH_ENGINE(Conv3D, EIGEN, EigenConvOp<float>);
 
 } // namespace caffe2

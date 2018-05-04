@@ -11,7 +11,6 @@ struct ExpCPUFunctor {
   }
 };
 
-namespace {
 REGISTER_CPU_OPERATOR(
     Exp,
     UnaryElementwiseOp<TensorTypes<float>, CPUContext, ExpCPUFunctor>);
@@ -31,7 +30,8 @@ and output blobs.
         0,
         "output",
         "The exponential of the input tensor computed "
-        "element-wise");
+        "element-wise")
+    .InheritOnnxSchema("Exp");
 
 class GetExpGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
@@ -44,5 +44,4 @@ class GetExpGradient : public GradientMakerBase {
   }
 };
 REGISTER_GRADIENT(Exp, GetExpGradient);
-} // namespace
 } // namespace caffe2

@@ -1,5 +1,5 @@
-#include "caffe2/core/common_cudnn.h"
 #include "caffe2/core/context_gpu.h"
+#include "caffe2/core/cudnn_wrappers.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/types.h"
 
@@ -23,10 +23,17 @@ class CuDNNReluOp final : public Operator<CUDAContext> {
     CUDNN_ENFORCE(cudnnDestroyActivationDescriptor(activ_desc_));
   }
 
-  template <typename T, typename M>
+  template <typename T>
   bool DoRunWithType() {
     const auto& X = Input(0);
     auto* Y = Output(0);
+
+    // Return if X is empty
+    if (X.size() == 0) {
+      Y->mutable_data<T>();
+      return true;
+    }
+
     // See if we need to reshape.
     if (X.dims() != cudnn_input_dims_) {
       VLOG(1) << "Setting descriptors.";
@@ -70,9 +77,9 @@ class CuDNNReluOp final : public Operator<CUDAContext> {
     Y->ResizeLike(X);
 
     if (X.IsType<float>()) {
-      return DoRunWithType<float,float>();
+      return DoRunWithType<float>();
     } else if (X.IsType<float16>()) {
-      return DoRunWithType<float16,float>();
+      return DoRunWithType<float16>();
     } else {
       LOG(FATAL) << "Unsupported input types";
     }
@@ -112,11 +119,18 @@ class CuDNNReluGradientOp final : public Operator<CUDAContext> {
     CUDNN_ENFORCE(cudnnDestroyActivationDescriptor(activ_desc_));
   }
 
-  template <typename T, typename M>
+  template <typename T>
   bool DoRunWithType() {
     const auto& Y = Input(0);
     const auto& dY = Input(1);
     auto* dX = Output(0);
+
+    // Return if Y is empty
+    if (Y.size() == 0) {
+      dX->mutable_data<T>();
+      return true;
+    }
+
     // See if we need to reshape.
     if (Y.dims() != cudnn_input_dims_) {
       VLOG(1) << "Setting descriptors.";
@@ -169,9 +183,9 @@ class CuDNNReluGradientOp final : public Operator<CUDAContext> {
     dX->ResizeLike(Y);
 
     if (Y.IsType<float>()) {
-      return DoRunWithType<float,float>();
+      return DoRunWithType<float>();
     } else if (Y.IsType<float16>()) {
-      return DoRunWithType<float16,float>();
+      return DoRunWithType<float16>();
     } else {
       LOG(FATAL) << "Unsupported input types";
     }

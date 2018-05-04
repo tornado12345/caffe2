@@ -9,7 +9,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "caffe2/utils/mkl_utils.h"
+#include "caffe2/mkl/mkl_utils.h"
 
 #ifdef CAFFE2_HAS_MKL_DNN
 
@@ -34,9 +34,8 @@ class MKLMemoryFetcher : public BlobFetcherBase {
     for (const auto dim : src.dims()) {
       npy_dims.push_back(dim);
     }
-    auto result = pybind11::object(
-        PyArray_SimpleNew(src.dims().size(), npy_dims.data(), numpy_type),
-        /* borrowed */ false);
+    auto result = pybind11::reinterpret_steal<pybind11::object>(
+        PyArray_SimpleNew(src.dims().size(), npy_dims.data(), numpy_type));
     void* ptr = static_cast<void*>(
         PyArray_DATA(reinterpret_cast<PyArrayObject*>(result.ptr())));
     src.CopyTo(ptr);

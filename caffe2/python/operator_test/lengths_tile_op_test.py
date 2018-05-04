@@ -20,7 +20,7 @@ class TestLengthsTileOp(hu.HypothesisTestCase):
                           elements=st.integers(min_value=0, max_value=20)),
             )
         ),
-        **hu.gcs_cpu_only)
+        **hu.gcs)
     def test_lengths_tile(self, inputs, gc, dc):
         data, lengths = inputs
 
@@ -40,4 +40,12 @@ class TestLengthsTileOp(hu.HypothesisTestCase):
             op=op,
             inputs=[data, lengths],
             reference=lengths_tile_op,
+        )
+
+        self.assertGradientChecks(
+            device_option=gc,
+            op=op,
+            inputs=[data, lengths],
+            outputs_to_check=0,
+            outputs_with_grads=[0]
         )

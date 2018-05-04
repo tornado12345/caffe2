@@ -1,6 +1,7 @@
 #include "caffe2/core/context_gpu.h"
-#include "caffe2/operators/reshape_op.h"
+#include "caffe2/operators/flatten_op.h"
 #include "caffe2/operators/utility_ops.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
 
@@ -50,18 +51,13 @@ class CopyOnDeviceLikeOp<CUDAContext, CUDAContext, CUDAContext>
   }
 };
 
-namespace {
-
 REGISTER_CUDA_OPERATOR(Print, PrintOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(Flatten, FlattenOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(FlattenToVec, FlattenToVecOp<CUDAContext>);
-REGISTER_CUDA_OPERATOR(Squeeze, SqueezeOp<CUDAContext>);
-REGISTER_CUDA_OPERATOR(ExpandDims, ExpandDimsOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(Alias, AliasOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(ResizeLike, ResizeLikeOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(Sum, SumOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(WeightedSum, WeightedSumOp<CUDAContext>);
-REGISTER_CUDA_OPERATOR(Shape, ShapeOp<CUDAContext>);
 // From whatever the current context, ensure the output is TensorCPU
 REGISTER_CUDA_OPERATOR(
     EnsureCPUOutput,
@@ -89,5 +85,4 @@ REGISTER_CUDA_OPERATOR(
 
 REGISTER_CUDA_OPERATOR(UnsafeCoalesce, UnsafeCoalesceOp<CUDAContext>);
 
-} // namespace
 } // namespace caffe2

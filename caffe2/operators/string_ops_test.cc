@@ -38,8 +38,48 @@ class StringJoinOpTest : public testing::Test {
   Workspace ws_;
 };
 
+TEST_F(StringJoinOpTest, testString1DJoin) {
+  std::vector<std::string> input = {"a", "xx", "c"};
+
+  auto blob = caffe2::make_unique<Blob>();
+  auto* tensor = blob->GetMutable<TensorCPU>();
+  tensor->Resize(input.size());
+  auto* data = tensor->mutable_data<std::string>();
+  for (int i = 0; i < input.size(); ++i) {
+    *data++ = input[i];
+  }
+
+  EXPECT_TRUE(runOp(*tensor));
+
+  const auto* outputData = checkAndGetOutput(input.size());
+  EXPECT_EQ(outputData[0], "a,");
+  EXPECT_EQ(outputData[1], "xx,");
+  EXPECT_EQ(outputData[2], "c,");
+}
+
+TEST_F(StringJoinOpTest, testString2DJoin) {
+  std::vector<std::vector<std::string>> input = {{"aa", "bb", "cc"},
+                                                 {"dd", "ee", "ff"}};
+
+  auto blob = caffe2::make_unique<Blob>();
+  auto* tensor = blob->GetMutable<TensorCPU>();
+  tensor->Resize(input.size(), input[0].size());
+  auto* data = tensor->mutable_data<std::string>();
+  for (int i = 0; i < input.size(); ++i) {
+    for (int j = 0; j < input[0].size(); ++j) {
+      *data++ = input[i][j];
+    }
+  }
+
+  EXPECT_TRUE(runOp(*tensor));
+
+  const auto* outputData = checkAndGetOutput(input.size());
+  EXPECT_EQ(outputData[0], "aa,bb,cc,");
+  EXPECT_EQ(outputData[1], "dd,ee,ff,");
+}
+
 TEST_F(StringJoinOpTest, testFloat1DJoin) {
-  std::vector<float> input = {3.90, 5.234, 8.12};
+  std::vector<float> input = {3.90f, 5.234f, 8.12f};
 
   auto blob = caffe2::make_unique<Blob>();
   auto* tensor = blob->GetMutable<TensorCPU>();
@@ -58,8 +98,8 @@ TEST_F(StringJoinOpTest, testFloat1DJoin) {
 }
 
 TEST_F(StringJoinOpTest, testFloat2DJoin) {
-  std::vector<std::vector<float>> input = {{1.23, 2.45, 3.56},
-                                           {4.67, 5.90, 6.32}};
+  std::vector<std::vector<float>> input = {{1.23f, 2.45f, 3.56f},
+                                           {4.67f, 5.90f, 6.32f}};
 
   auto blob = caffe2::make_unique<Blob>();
   auto* tensor = blob->GetMutable<TensorCPU>();

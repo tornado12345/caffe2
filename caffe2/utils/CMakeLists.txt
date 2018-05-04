@@ -21,12 +21,12 @@ exclude(Caffe2_CPU_SRCS "${Caffe2_CPU_SRCS}" ${tmp})
 exclude(Caffe2_CPU_SRCS "${Caffe2_CPU_SRCS}" ${Caffe2_GPU_SRCS})
 
 # ---[ threadpool/pthreadpool* is a local modification of the NNPACK
-# pthreadpool with a very similar interface. We used it internally to
-# wait on such changes to be merged to the upstream pthreadpool repo.
-# For the open source version, we do not need to use these files as we
-# will directly link nnpack pthreadpool.
-file(GLOB_RECURSE tmp pthreadpool*)
-exclude(Caffe2_CPU_SRCS "${Caffe2_CPU_SRCS}" ${tmp})
+# pthreadpool with a very similar interface. Neither NNPACK, nor this
+# thread pool supports Windows.
+if (MSVC)
+  file(GLOB_RECURSE tmp pthreadpool*)
+  exclude(Caffe2_CPU_SRCS "${Caffe2_CPU_SRCS}" ${tmp})
+endif()
 
 # ---[ GPU test files
 file(GLOB_RECURSE tmp *_gpu_test.cc)
@@ -42,3 +42,6 @@ set(Caffe2_CPU_SRCS ${Caffe2_CPU_SRCS} PARENT_SCOPE)
 set(Caffe2_GPU_SRCS ${Caffe2_GPU_SRCS} PARENT_SCOPE)
 set(Caffe2_CPU_TEST_SRCS ${Caffe2_CPU_TEST_SRCS} PARENT_SCOPE)
 set(Caffe2_GPU_TEST_SRCS ${Caffe2_GPU_TEST_SRCS} PARENT_SCOPE)
+
+# ---[ Printing stack traces requires dladdr
+

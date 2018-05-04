@@ -1,7 +1,7 @@
 #include "caffe2/operators/reshape_op.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
-namespace {
 
 REGISTER_CPU_OPERATOR(Reshape, ReshapeOp<float, CPUContext>);
 
@@ -120,7 +120,8 @@ from the input tensor.
     .Input(0, "data", "An input tensor.")
     .Input(1, "new_shape", "New shape.")
     .Output(0, "reshaped", "Reshaped data.")
-    .Output(1, "old_shape", "Original shape.");
+    .Output(1, "old_shape", "Original shape.")
+    .InheritOnnxSchema("Reshape");
 
 class GetReshapeGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
@@ -139,7 +140,5 @@ class GetReshapeGradient : public GradientMakerBase {
 };
 
 REGISTER_GRADIENT(Reshape, GetReshapeGradient);
-
-} // namespace
 
 } // namespace caffe2

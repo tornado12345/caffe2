@@ -2,10 +2,13 @@
 
 #include <algorithm>
 
+#include "caffe2/contrib/gloo/common.h"
 #include "caffe2/core/operator.h"
+#include "caffe2/core/types.h"
 
-#include "gloo/algorithm.h"
-#include "gloo/context.h"
+#include <gloo/algorithm.h>
+#include <gloo/common/error.h>
+#include <gloo/context.h>
 
 namespace caffe2 {
 namespace gloo {
@@ -17,7 +20,14 @@ class BroadcastOp final : public Operator<Context> {
 
   BroadcastOp(const OperatorDef& operator_def, Workspace* ws)
       : Operator<Context>(operator_def, ws),
-        root_(OperatorBase::template GetSingleArgument<int>("root", 0)) {}
+        root_(OperatorBase::template GetSingleArgument<int>("root", 0)),
+        ws_(ws),
+        status_blob_(
+            OperatorBase::GetSingleArgument<std::string>("status_blob", "")) {
+    if (status_blob_ != "") {
+      ws_->CreateBlob(status_blob_);
+    }
+  }
 
   virtual ~BroadcastOp() {}
 
@@ -29,7 +39,17 @@ class BroadcastOp final : public Operator<Context> {
     update(current_);
     CAFFE_ENFORCE(current_ == init_, "Inputs/outputs have changed");
 
-    algorithm_->run();
+    try {
+      algorithm_->run();
+    } catch (::gloo::IoException& ioe) {
+      LOG(ERROR) << "Caught gloo IO exception: " << ioe.what();
+      if (status_blob_ != "") {
+        signalFailure(ws_->GetBlob(status_blob_), ioe);
+        return false;
+      } else {
+        throw ioe;
+      }
+    }
     return true;
   }
 
@@ -70,44 +90,6 @@ class BroadcastOp final : public Operator<Context> {
   // An instance is updated every time this op runs and is compared
   // to the reference instance for equality. If any parameter has
   // changed from run to run, the initialized algorithm is invalid.
-  struct GlooParameters {
-    std::shared_ptr<::gloo::Context> context;
-    std::vector<const void*> inputs;
-    std::vector<void*> outputs;
-    size_t size;
-    TypeMeta meta;
-
-    template <typename T>
-    std::vector<const T*> getInputs() {
-      std::vector<const T*> result;
-      result.reserve(inputs.size());
-      for (auto& input : inputs) {
-        result.push_back(reinterpret_cast<T*>(input));
-      }
-      return result;
-    }
-
-    template <typename T>
-    std::vector<T*> getOutputs() {
-      std::vector<T*> result;
-      result.reserve(outputs.size());
-      for (auto& output : outputs) {
-        result.push_back(reinterpret_cast<T*>(output));
-      }
-      return result;
-    }
-
-    template <typename T>
-    bool IsType() const {
-      return meta.Match<T>();
-    }
-
-    bool operator==(GlooParameters const& other) const {
-      return context == other.context && inputs == other.inputs &&
-          outputs == other.outputs && size == other.size && meta == other.meta;
-    }
-  };
-
   void update(GlooParameters& params) {
     params.context = OperatorBase::Input<std::shared_ptr<::gloo::Context>>(0);
     params.inputs.resize(InputSize() - 1);
@@ -122,6 +104,8 @@ class BroadcastOp final : public Operator<Context> {
 
   GlooParameters init_;
   GlooParameters current_;
+  Workspace* ws_;
+  std::string status_blob_;
 };
 
 } // namespace gloo

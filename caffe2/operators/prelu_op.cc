@@ -1,7 +1,8 @@
 #include "caffe2/operators/prelu_op.h"
-
-#include "caffe2/utils/cpu_neon.h"
 #include "caffe2/utils/math.h"
+
+#include "caffe2/core/types.h"
+#include "caffe2/utils/cpu_neon.h"
 
 namespace caffe2 {
 
@@ -201,7 +202,7 @@ bool PReluGradientOp<float, CPUContext>::RunOnDevice() {
       for (int i = 0; i < Y.size(); ++i) {
         if (Xdata[i] <= 0) {
           int c = (i / dim) % C / div_factor;
-          dWdata[c] += Ydata[i] * Xdata[i];
+          dWdata[c] += dYdata[i] * Xdata[i];
         }
       }
 
@@ -231,14 +232,14 @@ bool PReluGradientOp<float, CPUContext>::RunOnDevice() {
             (Xmat > 0)
                 .select(
                     Xmat.cwiseMin(0.0f), // zero gradients on the 'if' path.
-                    Ymat * Xmat)
+                    dYmat * Xmat)
                 .sum();
       } else {
         dXmat = (Xmat > 0).select(dYmat, dYmat.colwise() * Wvec);
         dWvec = (Xmat > 0)
                     .select(
                         Xmat.cwiseMin(0.0f), // zero gradients on the 'if' path.
-                        Ymat * Xmat)
+                        dYmat * Xmat)
                     .rowwise()
                     .sum();
       }
@@ -251,7 +252,6 @@ bool PReluGradientOp<float, CPUContext>::RunOnDevice() {
   return true;
 }
 
-namespace {
 REGISTER_CPU_OPERATOR(PRelu, PReluOp<float, CPUContext>);
 REGISTER_CPU_OPERATOR(PReluGradient, PReluGradientOp<float, CPUContext>);
 
@@ -260,7 +260,7 @@ OPERATOR_SCHEMA(PRelu)
     .NumInputs(2)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .IdenticalTypeAndShape()
+    .IdenticalTypeAndShapeOfInput(0)
     .SetDoc(R"DOC(
 
 PRelu takes input data (Tensor<T>) and slope tensor as input, and produces one
@@ -274,7 +274,8 @@ output data (Tensor<T>) where the function `f(x) = slope * x for x < 0`,
         "Slope",
         "1D slope tensor. If `Slope` is of size 1, the value is shared"
         "across different channels")
-    .Output(0, "Y", "1D input tensor");
+    .Output(0, "Y", "1D input tensor")
+    .InheritOnnxSchema("PRelu");
 
 // Input: Y, dY, output: dX
 OPERATOR_SCHEMA(PReluGradient).NumInputs(4).NumOutputs(2).SetDoc(R"DOC(
@@ -296,5 +297,4 @@ class GetPReluGradient : public GradientMakerBase {
 };
 REGISTER_GRADIENT(PRelu, GetPReluGradient);
 
-} // namespace
 } // namespace caffe2

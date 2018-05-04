@@ -5,7 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.python import schema
+from caffe2.python import core, schema
 from caffe2.python.layers.layers import (
     ModelLayer,
 )
@@ -27,11 +27,11 @@ class BatchMSELoss(ModelLayer):
             ),
             input_record
         )
-        self.tags.update({Tags.TRAIN_ONLY})
+        self.tags.update([Tags.EXCLUDE_FROM_PREDICTION])
 
         self.output_schema = schema.Scalar(
             np.float32,
-            model.net.NextScopedBlob(name + '_output'))
+            self.get_next_blob_reference('output'))
 
     def add_ops(self, net):
         prediction = net.Squeeze(
@@ -40,8 +40,20 @@ class BatchMSELoss(ModelLayer):
             dims=[1]
         )
 
+        label = self.input_record.label.field_blobs()
+        if self.input_record.label.field_type().base != (
+                self.input_record.prediction.field_type().base):
+
+            label = net.Cast(
+                label,
+                net.NextScopedBlob('cast_label'),
+                to=schema.data_type_for_dtype(
+                    self.input_record.prediction.field_type()
+                )
+            )
+
         label = net.StopGradient(
-            self.input_record.label(),
+            label,
             net.NextScopedBlob('stopped_label')
         )
 
@@ -49,5 +61,22 @@ class BatchMSELoss(ModelLayer):
             [label, prediction],
             net.NextScopedBlob('l2')
         )
+
+        if 'weight' in self.input_record.fields:
+            weight_blob = self.input_record.weight()
+            if self.input_record.weight.field_type().base != np.float32:
+                weight_blob = net.Cast(
+                    weight_blob,
+                    weight_blob + '_float32',
+                    to=core.DataType.FLOAT
+                )
+            weight_blob = net.StopGradient(
+                [weight_blob],
+                [net.NextScopedBlob('weight_stop_gradient')],
+            )
+            l2dist = net.Mul(
+                [l2dist, weight_blob],
+                net.NextScopedBlob('weighted_l2_distance'),
+            )
 
         net.AveragedLoss(l2dist, self.output_schema.field_blobs())

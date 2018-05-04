@@ -1,8 +1,6 @@
 #include "caffe2/operators/lengths_tile_op.h"
 
 namespace caffe2 {
-namespace {
-
 REGISTER_CPU_OPERATOR(LengthsTile, LengthsTileOp<CPUContext>);
 
 OPERATOR_SCHEMA(LengthsTile)
@@ -38,7 +36,19 @@ Example:
     .Input(1, "LENGTHS", "Tensor of int32 lengths of rank 1")
     .Output(0, "OUTPUT", "Tensor of rank r");
 
-GRADIENT_NOT_IMPLEMENTED_YET(LengthsTile);
-
-} // namespace
+class GetLengthsTileGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
+    CAFFE_ENFORCE_EQ(def_.input_size(), 2);
+    return SingleGradientDef(
+        "LengthsSum",
+        "",
+        // input 1 is the lengths used to repeat
+        // DATA in the forward pass
+        vector<string>{GO(0), I(1)},
+        // only concerned with the gradient on "DATA"
+        vector<string>{GI(0)});
+  }
+};
+REGISTER_GRADIENT(LengthsTile, GetLengthsTileGradient);
 } // namespace caffe2

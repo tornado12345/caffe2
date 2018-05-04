@@ -16,8 +16,8 @@ TEST(LoggingTest, TestEnforceFalse) {
   try {
     CAFFE_ENFORCE(false, "This throws.");
     // This should never be triggered.
-    EXPECT_FALSE(true);
-  } catch (const EnforceNotMet& err) {
+    ADD_FAILURE();
+  } catch (const EnforceNotMet&) {
   }
   std::swap(FLAGS_caffe2_use_fatal_for_enforce, kFalse);
 }
@@ -28,7 +28,7 @@ TEST(LoggingTest, TestEnforceEquals) {
   try {
     CAFFE_ENFORCE_THAT(Equals(++x, ++y));
     // This should never be triggered.
-    EXPECT_FALSE(true);
+    ADD_FAILURE();
   } catch (const EnforceNotMet& err) {
     EXPECT_NE(err.msg().find("5 vs 6"), string::npos);
   }
@@ -48,7 +48,7 @@ TEST(LoggingTest, EnforceShowcase) {
 #define WRAP_AND_PRINT(exp)                     \
   try {                                         \
     exp;                                        \
-  } catch (const EnforceNotMet& err) {          \
+  } catch (const EnforceNotMet&) {              \
     /* EnforceNotMet already does LOG(ERROR) */ \
   }
   WRAP_AND_PRINT(CAFFE_ENFORCE_EQ(one, two));

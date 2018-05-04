@@ -4,7 +4,9 @@ if (NOT __NCCL_INCLUDED)
   # try the system-wide nccl first
   find_package(NCCL)
   if (NCCL_FOUND)
-      set(NCCL_EXTERNAL FALSE)
+      add_library(__caffe2_nccl INTERFACE)
+      target_link_libraries(__caffe2_nccl INTERFACE ${NCCL_LIBRARIES})
+      target_include_directories(__caffe2_nccl INTERFACE ${NCCL_INCLUDE_DIRS})
   else()
     # build directory
     set(nccl_PREFIX ${PROJECT_SOURCE_DIR}/third_party/nccl)
@@ -23,17 +25,23 @@ if (NOT __NCCL_INCLUDED)
       BUILD_IN_SOURCE 1
       CONFIGURE_COMMAND ""
       BUILD_COMMAND
-          make "CXX=${CMAKE_CXX_COMPILER}" "CUDA_HOME=${CUDA_TOOLKIT_ROOT_DIR}"
+        make
+        "CXX=${CMAKE_CXX_COMPILER}"
+        "CUDA_HOME=${CUDA_TOOLKIT_ROOT_DIR}"
+        "NVCC=${CUDA_NVCC_EXECUTABLE}"
+      BUILD_BYPRODUCTS "${nccl_PREFIX}/build/lib/libnccl_static.a"
       INSTALL_COMMAND ""
       )
 
     set(NCCL_FOUND TRUE)
+    add_library(__caffe2_nccl INTERFACE)
+    # The following old-style variables are set so that other libs, such as Gloo,
+    # can still use it.
     set(NCCL_INCLUDE_DIRS ${nccl_PREFIX}/build/include)
     set(NCCL_LIBRARIES ${nccl_PREFIX}/build/lib/libnccl_static.a)
-    set(NCCL_LIBRARY_DIRS ${nccl_PREFIX}/build/lib)
-    set(NCCL_EXTERNAL TRUE)
-
-    list(APPEND external_project_dependencies nccl_external)
+    add_dependencies(__caffe2_nccl nccl_external)
+    target_link_libraries(__caffe2_nccl INTERFACE ${NCCL_LIBRARIES})
+    target_include_directories(__caffe2_nccl INTERFACE ${NCCL_INCLUDE_DIRS})
   endif()
 
 endif()

@@ -7,8 +7,8 @@ namespace caffe2 {
 
 namespace py = pybind11;
 
-PYBIND11_PLUGIN(mpi) {
-  py::module m("mpi_utils", "MPI helper functions");
+PYBIND11_MODULE(mpi_utils, m) {
+  m.doc() = "MPI helper functions";
   m.def(
       "SetupPeers",
       &MPISetupPeers,
@@ -42,7 +42,6 @@ PYBIND11_PLUGIN(mpi) {
     MPI_Bcast(ptr.get(), length, MPI_CHAR, 0, comm);
     return std::string(ptr.get(), length);
   });
-  return m.ptr();
 }
 
 } // namespace caffe2

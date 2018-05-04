@@ -3,7 +3,6 @@
 #include "caffe2/core/net.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/mpi/mpi_common.h"
-#include "google/protobuf/text_format.h"
 #include <gtest/gtest.h>
 
 CAFFE2_DEFINE_string(
@@ -19,7 +18,7 @@ const char kBcastNet[] = R"NET(
   }
   op {
     output: "X"
-    type: "MPIConstantFill"
+    type: "ConstantFill"
     arg {
       name: "shape"
       ints: 10
@@ -46,7 +45,7 @@ const char kBcastNet[] = R"NET(
 
 TEST(MPITest, TestMPIBroadcast) {
   NetDef net_def;
-  CHECK(google::protobuf::TextFormat::ParseFromString(
+  CHECK(TextFormat::ParseFromString(
       string(kBcastNet), &net_def));
   // Let's set the network's constant fill value to be the mpi rank.
   auto* arg = net_def.mutable_op(1)->mutable_arg(1);
@@ -81,7 +80,7 @@ const char kReduceNet[] = R"NET(
   }
   op {
     output: "X"
-    type: "MPIConstantFill"
+    type: "ConstantFill"
     arg {
       name: "shape"
       ints: 10
@@ -108,7 +107,7 @@ const char kReduceNet[] = R"NET(
 
 TEST(MPITest, TestMPIReduce) {
   NetDef net_def;
-  CHECK(google::protobuf::TextFormat::ParseFromString(
+  CHECK(TextFormat::ParseFromString(
       string(kReduceNet), &net_def));
   // Let's set the network's constant fill value to be the mpi rank.
   auto* arg = net_def.mutable_op(1)->mutable_arg(1);
@@ -150,7 +149,7 @@ const char kMPIAllgatherNet[] = R"NET(
   }
   op {
     output: "X"
-    type: "MPIConstantFill"
+    type: "ConstantFill"
     arg {
       name: "shape"
       ints: 2
@@ -174,7 +173,7 @@ const char kMPIAllgatherNet[] = R"NET(
 
 TEST(MPITest, TestMPIAllgather) {
   NetDef net_def;
-  CHECK(google::protobuf::TextFormat::ParseFromString(
+  CHECK(TextFormat::ParseFromString(
       string(kMPIAllgatherNet), &net_def));
   // Let's set the network's constant fill value to be the mpi rank.
   auto* arg = net_def.mutable_op(1)->mutable_arg(1);
@@ -214,7 +213,7 @@ const char kMPIAllreduceNet[] = R"NET(
   }
   op {
     output: "X"
-    type: "MPIConstantFill"
+    type: "ConstantFill"
     arg {
       name: "shape"
       ints: 10
@@ -237,7 +236,7 @@ const char kMPIAllreduceNet[] = R"NET(
 
 TEST(MPITest, TestMPIAllreduce) {
   NetDef net_def;
-  CHECK(google::protobuf::TextFormat::ParseFromString(
+  CHECK(TextFormat::ParseFromString(
       string(kMPIAllreduceNet), &net_def));
   // Let's set the network's constant fill value to be the mpi rank.
   auto* arg = net_def.mutable_op(1)->mutable_arg(1);
@@ -276,7 +275,7 @@ const char kInPlaceMPIAllreduceNet[] = R"NET(
   }
   op {
     output: "X"
-    type: "MPIConstantFill"
+    type: "ConstantFill"
     arg {
       name: "shape"
       ints: 10
@@ -299,7 +298,7 @@ const char kInPlaceMPIAllreduceNet[] = R"NET(
 
 TEST(MPITest, TestInPlaceMPIAllreduce) {
   NetDef net_def;
-  CHECK(google::protobuf::TextFormat::ParseFromString(
+  CHECK(TextFormat::ParseFromString(
       string(kInPlaceMPIAllreduceNet), &net_def));
   // Let's set the network's constant fill value to be the mpi rank.
   auto* arg = net_def.mutable_op(1)->mutable_arg(1);

@@ -45,19 +45,8 @@ TensorPrinter::~TensorPrinter() {
   }
 }
 
-std::string TensorPrinter::MetaStr(const Tensor<CPUContext>& tensor) {
-  std::stringstream meta_stream;
-  meta_stream << "Tensor " << tensor_name_ << " of type "
-              << tensor.meta().name() << ". Dims: (";
-  for (const auto dim : tensor.dims()) {
-    meta_stream << dim << ",";
-  }
-  meta_stream << "): ";
-  return meta_stream.str();
-}
-
 static CaffeMap<CaffeTypeId, TypeCall> type_call_registry_ {
-  {TypeMeta::Id<Tensor<CPUContext>>(), GetTensorType<Tensor<CPUContext>>}
+  {TypeMeta::Id<Tensor<CPUContext>>(), GetTensorType<CPUContext>}
 };
 
 TypeCall GetTypeCallFunction(CaffeTypeId id) {
@@ -72,20 +61,19 @@ void RegisterTypeCallFunction(CaffeTypeId id, TypeCall c) {
   type_call_registry_[id] = c;
 }
 
-static CaffeMap<CaffeTypeId, ShapeCall> shape_call_registry_ {
-  {TypeMeta::Id<Tensor<CPUContext>>(), GetTensorShape<Tensor<CPUContext>>}
-};
+static CaffeMap<CaffeTypeId, TensorInfoCall> tensor_info_call_registry_{
+    {TypeMeta::Id<Tensor<CPUContext>>(), GetTensorInfo<CPUContext>}};
 
-ShapeCall GetShapeCallFunction(CaffeTypeId id) {
-  auto f = shape_call_registry_.find(id);
-  if (f == shape_call_registry_.end()) {
+TensorInfoCall GetTensorInfoFunction(CaffeTypeId id) {
+  auto f = tensor_info_call_registry_.find(id);
+  if (f == tensor_info_call_registry_.end()) {
     return nullptr;
   }
   return f->second;
 }
 
-void RegisterShapeCallFunction(CaffeTypeId id, ShapeCall c) {
-  shape_call_registry_[id] = c;
+void RegisterTensorInfoFunction(CaffeTypeId id, TensorInfoCall c) {
+  tensor_info_call_registry_[id] = c;
 }
 
 namespace {

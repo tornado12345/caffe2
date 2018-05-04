@@ -11,6 +11,7 @@ import os
 import time
 import signal
 import logging
+from future.utils import viewitems
 
 
 '''
@@ -57,7 +58,7 @@ class WatcherThread(threading.Thread):
                 import sys
                 import traceback
                 code = []
-                for threadId, stack in sys._current_frames().items():
+                for threadId, stack in viewitems(sys._current_frames()):
                     if threadId == self.caller_thread.ident:
                         code.append("\n# ThreadID: %s" % threadId)
                         for filename, lineno, name, line in traceback.extract_stack(stack):
@@ -67,7 +68,7 @@ class WatcherThread(threading.Thread):
 
                 print("\n".join(code))
                 log.error("Process did not terminate cleanly in 10 s, forcing")
-                os._exit(1)
+                os.abort()
 
             forcet = threading.Thread(target=forcequit, args=())
             forcet.daemon = True
@@ -77,7 +78,7 @@ class WatcherThread(threading.Thread):
             import sys
             import traceback
             code = []
-            for threadId, stack in sys._current_frames().items():
+            for threadId, stack in viewitems(sys._current_frames()):
                 code.append("\n# ThreadID: %s" % threadId)
                 for filename, lineno, name, line in traceback.extract_stack(stack):
                     code.append('File: "%s", line %d, in %s' % (filename, lineno, name))

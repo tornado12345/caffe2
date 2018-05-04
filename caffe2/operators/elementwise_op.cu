@@ -85,7 +85,7 @@ CUDA_FUNCTOR(GT, CUDA_GT, NumericTypes, FixedType<bool>);
 CUDA_FUNCTOR(GE, CUDA_GE, NumericTypes, FixedType<bool>);
 #undef CUDA_GE
 #define CUDA_EQ(x, y) ((x) == (y))
-CUDA_FUNCTOR(EQ, CUDA_EQ, IntTypes, FixedType<bool>);
+CUDA_FUNCTOR(EQ, CUDA_EQ, IntBoolTypes, FixedType<bool>);
 #undef CUDA_EQ
 #define CUDA_AND(x, y) ((x) & (y))
 CUDA_FUNCTOR(And, CUDA_AND, BoolTypes, FixedType<bool>);
@@ -146,12 +146,12 @@ reduce_sum_like_post1(const T* g_idata, T* g_odata, int pre, int N) {
     return;
   }
 
-  T sum = (T)0;
+  float sum = 0.0;
   for (int i = 0; i < pre; ++i) {
-    sum += g_idata[i * N + n];
+    sum += convert::To<T, float>(g_idata[i * N + n]);
   }
 
-  g_odata[n] = sum;
+  g_odata[n] = convert::To<float, T>(sum);
 }
 
 template <typename T>
@@ -163,35 +163,75 @@ void device_reduce(
     CUDAContext* context) {
   // Determine temporary device storage requirements
   size_t temp_storage_bytes = 0;
-  cub::DeviceReduce::Sum(NULL, temp_storage_bytes, d_in, d_out, N);
+  cub::DeviceReduce::Sum(
+      NULL, temp_storage_bytes, d_in, d_out, N, context->cuda_stream());
 
   auto buffer_size = temp_storage_bytes / sizeof(T);
   buffer_size += temp_storage_bytes % sizeof(T) != 0 ? 1 : 0;
   buffer->Resize(buffer_size);
   void* d_temp_storage = static_cast<void*>(buffer->template mutable_data<T>());
   // Run sum-reduction
-  cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in, d_out, N);
+  cub::DeviceReduce::Sum(
+      d_temp_storage,
+      temp_storage_bytes,
+      d_in,
+      d_out,
+      N,
+      context->cuda_stream());
+}
+
+template <>
+void device_reduce<float16>(
+    const float16* in,
+    float16* out,
+    int N,
+    Tensor<CUDAContext>* buffer,
+    CUDAContext* context) {
+  auto buffer_size = 1;
+
+  if (buffer->size() != buffer_size) {
+    buffer->Resize(buffer_size);
+
+    math::Set<float16, CUDAContext>(
+        N,
+        convert::To<float,float16>(1.),
+        buffer->mutable_data<float16>(),
+        context);
+  }
+
+  CUBLAS_ENFORCE(cublasDotEx(
+              context->cublas_handle(),
+              N,
+              in,
+              CUDA_R_16F,
+              1,
+              buffer->data<float16>(),
+              CUDA_R_16F,
+              0,
+              out,
+              CUDA_R_16F,
+              CUDA_R_32F));
 }
 
 template <typename T, int BLOCK_THREADS>
 __global__ void
 reduce_sum_like(const T* g_idata, T* g_odata, int pre, int N, int post) {
   int n = blockIdx.x;
-  T sum = (T)0;
+  float sum = 0.0;
   int limit = pre * post;
   for (int i = threadIdx.x; i < limit; i += blockDim.x) {
     int curPre = i / post;
     int curPost = i % post;
 
-    sum += g_idata[curPre * N * post + n * post + curPost];
+    sum += convert::To<T, float>(g_idata[curPre * N * post + n * post + curPost]);
   }
   // uses a shared memory reduction within block
-  typedef cub::BlockReduce<T, BLOCK_THREADS> BlockReduceT;
+  typedef cub::BlockReduce<float, BLOCK_THREADS> BlockReduceT;
   // Shared memory
   __shared__ typename BlockReduceT::TempStorage temp_storage;
-  T aggregate = BlockReduceT(temp_storage).Sum(sum);
+  float aggregate = BlockReduceT(temp_storage).Sum(sum);
   if (threadIdx.x == 0) {
-    g_odata[n] = aggregate;
+    g_odata[n] = convert::To<float, T>(aggregate);
   }
 }
 } // namespace
@@ -210,29 +250,8 @@ bool SumReduceLikeOp<CUDAContext>::DoRunWithType() {
   if (B.size() == 1) {
     device_reduce<T>(Adata, Cdata, count, &sum_buffer_, &context_);
   } else {
-    CAFFE_ENFORCE_GT(
-        A.ndim(),
-        B.ndim(),
-        "If you are doing ReduceSumLike, input1 should have "
-        "a smaller number of dimensions.");
-    const int axis = (axis_ == -1 ? A.ndim() - B.ndim() : axis_);
-    CAFFE_ENFORCE(
-        axis >= 0 && axis < A.ndim(),
-        "ReduceSum axis should be in the range of the number "
-        "of dimensions of the first input.");
-    size_t pre = 1, n = 1, post = 1;
-    for (int i = 0; i < axis; ++i) {
-      pre *= A.dim(i);
-    }
-    for (int i = 0; i < B.ndim(); ++i) {
-      CAFFE_ENFORCE_EQ(
-          A.dim(i + axis), B.dim(i), "Broadcast dimension mismatch.");
-      n *= B.dim(i);
-    }
-    for (int i = axis + B.ndim(); i < A.ndim(); ++i) {
-      post *= A.dim(i);
-    }
-
+    size_t pre, n, post;
+    std::tie(pre, n, post) = calculate_broadcast_sizes(A, B, axis_);
     // because we check shape(B) \in shape(A) before,
     // post and pre cannot be 1 at same time
     if (post == 1) {
@@ -258,6 +277,11 @@ bool SumReduceLikeOp<CUDAContext>::DoRunWithType() {
     }
   }
   return true;
+}
+
+template <>
+bool SumReduceLikeOp<CUDAContext>::RunOnDevice() {
+  return DispatchHelper<TensorTypes<float, float16>>::call(this, Input(0));
 }
 
 REGISTER_CUDA_OPERATOR(SumReduceLike, SumReduceLikeOp<CUDAContext>);
@@ -358,29 +382,8 @@ class CUDAAddOp final : public Operator<CUDAContext> {
           0,
           context_.cuda_stream()>>>(X0.size(), X0data, X1data, outputData);
     } else {
-      CAFFE_ENFORCE_GT(
-          X0.ndim(),
-          X1.ndim(),
-          "If you are doing broadcasting, input1 should have "
-          "a smaller number of dimensions.");
-      const int axis = (axis_ == -1 ? X0.ndim() - X1.ndim() : axis_);
-      CAFFE_ENFORCE(
-          axis >= 0 && axis < X0.ndim(),
-          "Broadcast axis should be in the range of the number "
-          "of dimensions of the first input.");
-      size_t pre = 1, n = 1, post = 1;
-      for (int i = 0; i < axis; ++i) {
-        pre *= X0.dim(i);
-      }
-      for (int i = 0; i < X1.ndim(); ++i) {
-        CAFFE_ENFORCE_EQ(
-            X0.dim(i + axis), X1.dim(i), "Broadcast dimension mismatch.");
-        n *= X1.dim(i);
-      }
-      for (int i = axis + X1.ndim(); i < X0.ndim(); ++i) {
-        post *= X0.dim(i);
-      }
-
+      size_t pre, n, post;
+      std::tie(pre, n, post) = calculate_broadcast_sizes(X0, X1, axis_);
       if (post == 1) {
         binary_add_kernel_broadcast<true, T, M><<<
             CAFFE_GET_BLOCKS(pre * n),
@@ -419,8 +422,6 @@ class CUDAAddOp final : public Operator<CUDAContext> {
   string order_;
 };
 
-namespace {
 REGISTER_CUDA_OPERATOR(Add, CUDAAddOp);
-} // namespace
 
 }  // namespace caffe2

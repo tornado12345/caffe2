@@ -113,14 +113,14 @@ argument. Returns the updated integer and the value prior to the update.
 OPERATOR_SCHEMA(CreateAtomicBool)
     .NumInputs(0)
     .NumOutputs(1)
-    .SetDoc("Create an unique_ptr blob to hold a atomic<bool>")
+    .SetDoc("Create an unique_ptr blob to hold an atomic<bool>")
     .Output(0, "atomic_bool", "Blob containing a unique_ptr<atomic<bool>>");
 
 OPERATOR_SCHEMA(ConditionalSetAtomicBool)
     .NumInputs(2)
     .NumOutputs(0)
     .SetDoc(R"DOC(
-    Set an atomic<bool> to true if the given condition bool variable is true
+Set an atomic<bool> to true if the given condition bool variable is true
     )DOC")
     .Input(0, "atomic_bool", "Blob containing a unique_ptr<atomic<bool>>")
     .Input(1, "condition", "Blob containing a bool");
@@ -128,7 +128,7 @@ OPERATOR_SCHEMA(ConditionalSetAtomicBool)
 OPERATOR_SCHEMA(CheckAtomicBool)
     .NumInputs(1)
     .NumOutputs(1)
-    .SetDoc("Copy the value of a atomic<bool> to a bool")
+    .SetDoc("Copy the value of an atomic<bool> to a bool")
     .Input(0, "atomic_bool", "Blob containing a unique_ptr<atomic<bool>>")
     .Output(0, "value", "Copy of the value for the atomic<bool>");
 

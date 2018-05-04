@@ -78,6 +78,9 @@ std::unordered_map<std::string, std::unique_ptr<NCCLContext>>& gContexts() {
 
 std::string ncclKey(const NCCLExecution& ex) {
   std::string result;
+  int curr_device;
+  CUDA_CHECK(cudaGetDevice(&curr_device));
+  result += to_string(curr_device) + ":";
   for (const auto& el : ex.elements) {
     result += to_string(el.device) + ",";
   }
@@ -103,7 +106,13 @@ class ncclTypeWrapper<float> {
   static const ncclDataType_t type = ncclFloat;
 };
 
-#ifdef CUDA_HAS_HALF
+template <>
+class ncclTypeWrapper<int> {
+ public:
+  static const ncclDataType_t type = ncclInt;
+};
+
+#ifdef CAFFE_HAS_CUDA_FP16
 template <>
 class ncclTypeWrapper<float16> {
  public:
@@ -111,8 +120,15 @@ class ncclTypeWrapper<float16> {
 };
 #endif
 
-template <typename T, typename F>
-void runNCCL(const NCCLExecution& ex, F&& f) {
+template <typename T, typename InitF, typename F>
+void runNCCL(const NCCLExecution& ex, InitF&& init_f, F&& f) {
+  // do initialization
+  for (auto i = 0; i < ex.elements.size(); ++i) {
+    auto& ctx = ex.elements[i];
+    DeviceGuard g(ctx.device);
+    init_f(ex.elements[i]);
+  }
+
   std::lock_guard<std::mutex> g(gContextsMutex());
   auto* context = getNCCLContext(ex);
   auto& comms = context->comms_;
@@ -129,6 +145,11 @@ void runNCCL(const NCCLExecution& ex, F&& f) {
   {
     // lock out alloc / free while NCCL launches
     std::lock_guard<std::mutex> lock(CUDAContext::mutex());
+
+#if NCCL_VERSION_MIN(2, 0, 0)
+    CAFFE_NCCL_CHECK(ncclGroupStart());
+#endif
+
     for (auto i = 0; i < ex.elements.size(); ++i) {
       auto& ctx = ex.elements[i];
       DeviceGuard g(ctx.device);
@@ -139,6 +160,19 @@ void runNCCL(const NCCLExecution& ex, F&& f) {
       DCHECK_EQ(ctx.device, GetGPUIDForPointer(ctx.src->raw_data()));
       CUDA_ENFORCE(cudaStreamWaitEvent(stream, context->master_event_, 0));
       f(ctx, comm, stream);
+    }
+
+#if NCCL_VERSION_MIN(2, 0, 0)
+    CAFFE_NCCL_CHECK(ncclGroupEnd());
+#endif
+
+    for (auto i = 0; i < ex.elements.size(); ++i) {
+      auto& ctx = ex.elements[i];
+      DeviceGuard g(ctx.device);
+      auto& comm = comms[i];
+      auto& stream = streams[i];
+      auto& event = events[i];
+
       // Record an event on each children stream that we have finished
       // our computation
       CUDA_ENFORCE(cudaEventRecord(event, stream));
@@ -157,9 +191,12 @@ void runNCCL(const NCCLExecution& ex, F&& f) {
 template <typename T>
 void NCCL<T>::AllReduce(const NCCLExecution& ex) {
   return runNCCL<T>(
-      ex, [](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+      ex,
+      [](const NCCLElement& ctx) {
         ctx.dst->Resize(ctx.src->dims());
         ctx.dst->template mutable_data<T>();
+      },
+      [](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
         CAFFE_NCCL_CHECK(ncclAllReduce(
             ctx.src->raw_data(),
             ctx.dst->raw_mutable_data(),
@@ -174,9 +211,12 @@ void NCCL<T>::AllReduce(const NCCLExecution& ex) {
 template <typename T>
 void NCCL<T>::Broadcast(const NCCLExecution& ex) {
   return runNCCL<T>(
-      ex, [&ex](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+      ex,
+      [](const NCCLElement& ctx) {
         ctx.dst->Resize(ctx.src->dims());
         ctx.dst->template mutable_data<T>();
+      },
+      [&ex](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
         CAFFE_NCCL_CHECK(ncclBcast(
             ctx.dst->raw_mutable_data(),
             ctx.dst->size(),
@@ -190,11 +230,14 @@ void NCCL<T>::Broadcast(const NCCLExecution& ex) {
 template <typename T>
 void NCCL<T>::Reduce(const NCCLExecution& ex) {
   return runNCCL<T>(
-      ex, [&ex](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+      ex,
+      [](const NCCLElement& ctx) {
         if (ctx.dst) {
           ctx.dst->Resize(ctx.src->dims());
           ctx.dst->template mutable_data<T>();
         }
+      },
+      [&ex](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
         CAFFE_NCCL_CHECK(ncclReduce(
             ctx.src->raw_data(),
             ctx.dst ? ctx.dst->raw_mutable_data() : nullptr,
@@ -211,7 +254,8 @@ template <typename T>
 void NCCL<T>::AllGather(const NCCLExecution& ex) {
   const auto n = ex.elements.size();
   return runNCCL<T>(
-      ex, [n](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+      ex,
+      [n](const NCCLElement& ctx) {
         CAFFE_ENFORCE_NE(ctx.src, ctx.dst);
         std::vector<TIndex> dims;
         dims.reserve(ctx.src->ndim() + 1);
@@ -221,6 +265,17 @@ void NCCL<T>::AllGather(const NCCLExecution& ex) {
         }
         ctx.dst->Resize(dims);
         ctx.dst->template mutable_data<T>();
+      },
+      [n](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+#if NCCL_VERSION_MIN(2, 0, 0)
+        CAFFE_NCCL_CHECK(ncclAllGather(
+            ctx.src->raw_data(),
+            ctx.dst->raw_mutable_data(),
+            ctx.src->size(),
+            ncclTypeWrapper<T>::type,
+            comm,
+            stream));
+#else
         CAFFE_NCCL_CHECK(ncclAllGather(
             ctx.src->raw_data(),
             ctx.src->size(),
@@ -228,12 +283,38 @@ void NCCL<T>::AllGather(const NCCLExecution& ex) {
             ctx.dst->raw_mutable_data(),
             comm,
             stream));
+#endif
+      });
+}
+
+template <typename T>
+void NCCL<T>::ReduceScatter(const NCCLExecution& ex) {
+  const auto n = ex.elements.size();
+  return runNCCL<T>(
+      ex,
+      [](const NCCLElement& ctx) {
+        CAFFE_ENFORCE_NE(ctx.src, ctx.dst);
+        const auto& srcDims = ctx.src->dims();
+        std::vector<TIndex> dstDims(srcDims.begin() + 1, srcDims.end());
+        ctx.dst->Resize(dstDims);
+        ctx.dst->template mutable_data<T>();
+      },
+      [n](const NCCLElement& ctx, ncclComm_t comm, cudaStream_t stream) {
+        CAFFE_NCCL_CHECK(ncclReduceScatter(
+            ctx.src->raw_data(),
+            ctx.dst->raw_mutable_data(),
+            ctx.dst->size(),
+            ncclTypeWrapper<T>::type,
+            ncclSum,
+            comm,
+            stream));
       });
 }
 
 // Explicit instantiation
 template class NCCL<float>;
-#ifdef CUDA_HAS_HALF
+template class NCCL<int>;
+#ifdef CAFFE_HAS_CUDA_FP16
 template class NCCL<float16>;
 #endif
 }

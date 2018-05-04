@@ -20,6 +20,7 @@ struct BlobState {
   int64_t total_size;
   int64_t current_size;
   bool is_tensor;
+  std::set<int32_t> seen_chunks_ids;
 
   explicit BlobState(
       int64_t total_size = 0,
@@ -53,17 +54,8 @@ class DBExistsOp final : public Operator<Context> {
     auto* output = Output(0);
     output->Resize();
     bool* exists = output->template mutable_data<bool>();
-    // Warning! We assume that creating a DB throws an exception if the DB
-    // does not exist. If the DB constructor does not follow this design
-    // pattern,
-    // the returned output (the existence tensor) can be wrong.
-    try {
-      std::unique_ptr<DB> db(
-          caffe2::db::CreateDB(db_type_, full_db_name, caffe2::db::READ));
-      *exists = true;
-    } catch (...) {
-      *exists = false;
-    }
+
+    *exists = caffe2::db::DBExists(db_type_, full_db_name);
     return true;
   }
 
@@ -87,22 +79,52 @@ class LoadOp final : public Operator<Context> {
         strip_prefix_(
             OperatorBase::GetSingleArgument<string>("strip_prefix", "")),
         db_name_(OperatorBase::GetSingleArgument<string>("db", "")),
+        db_names_(OperatorBase::GetRepeatedArgument<string>("dbs")),
         db_type_(OperatorBase::GetSingleArgument<string>("db_type", "")),
         keep_device_(OperatorBase::GetSingleArgument<int>("keep_device", 0)),
         load_all_(OperatorBase::GetSingleArgument<int>("load_all", 0)),
         allow_incomplete_(
-            OperatorBase::GetSingleArgument<bool>("allow_incomplete", false)) {
+            OperatorBase::GetSingleArgument<bool>("allow_incomplete", false)),
+        blob_names_(
+            OperatorBase::GetRepeatedArgument<string>("source_blob_names")) {
     if (InputSize() == 0) {
-      CAFFE_ENFORCE_GT(db_name_.size(), 0, "Must specify a db name.");
       CAFFE_ENFORCE_GT(db_type_.size(), 0, "Must specify a db type.");
+      if (db_names_.empty()) {
+        CAFFE_ENFORCE_GT(db_name_.size(), 0, "Must specify a db name.");
+        db_names_.push_back(db_name_);
+        db_name_ = "";
+      } else {
+        std::set<std::string> db_name_set;
+        for (const string& db_name : db_names_) {
+          CAFFE_ENFORCE_GT(db_name.size(), 0, "Db name should not be empty.");
+          CAFFE_ENFORCE(
+              db_name_set.insert(db_name).second,
+              "Duplicated db name: ",
+              db_name);
+        }
+        db_name_ = "";
+      }
     }
+    CAFFE_ENFORCE(blob_names_.empty() || blob_names_.size() == OutputSize(),
+      "Number of output blobs and source_blob_names mismatch.");
+    CAFFE_ENFORCE(blob_names_.empty() || strip_prefix_.empty(),
+        "strip_prefix and source_blob_names are mutually exclusive.");
+    CAFFE_ENFORCE(blob_names_.empty() || !load_all_,
+        "cannot load_all_ while using source_blob_names.");
     if (!load_all_) {
+      // blob_names_ will be filled with ''source blob names'' in file/db
+      // if argument source_blob_names is not given, then blob_names_ is
+      // inferred from operator output
+      if(blob_names_.empty()) {
+        for (const string& name : operator_def.output()) {
+          blob_names_.push_back(name);
+        }
+      }
       int idx = 0;
-      std::set<std::string> input_names;
-      for (const string& output_name : this->def().output()) {
-        std::string name = output_name;
-        CAFFE_ENFORCE(
-            input_names.insert(name).second, "Duplicated input: ", name);
+      std::set<std::string> name_set;
+      for (const string& name : blob_names_) {
+        CAFFE_ENFORCE(name_set.insert(name).second,
+            "Duplicated source blob name: ", name);
         output_indices_[name] = idx++;
       }
     }
@@ -111,37 +133,87 @@ class LoadOp final : public Operator<Context> {
   void SetCurrentDevice(BlobProto* proto);
 
   bool RunOnDevice() override {
-    if (InputSize() == 1) {
-      const db::DBReader& reader = OperatorBase::Input<db::DBReader>(0);
-      extract(reader.cursor());
+    int total_loaded_blobs = 0;
+    std::unordered_map<string, BlobState> blob_states;
+    if (InputSize() > 0) {
+      for (int i = 0; i < InputSize(); ++i) {
+        const db::DBReader& reader = OperatorBase::Input<db::DBReader>(i);
+        extract(i, reader.cursor(), &blob_states, &total_loaded_blobs);
+      }
     } else {
-      string full_db_name =
-          absolute_path_ ? db_name_ : (ws_->RootFolder() + "/" + db_name_);
-      std::unique_ptr<DB> in_db(
-          caffe2::db::CreateDB(db_type_, full_db_name, caffe2::db::READ));
-      CAFFE_ENFORCE(in_db.get(), "Cannot open db: ", db_name_);
-      std::unique_ptr<Cursor> cursor(in_db->NewCursor());
-      extract(cursor.get());
+      for (int i = 0; i < db_names_.size(); ++i) {
+        string full_db_name = absolute_path_
+            ? db_names_[i]
+            : (ws_->RootFolder() + "/" + db_names_[i]);
+        std::unique_ptr<DB> in_db(
+            caffe2::db::CreateDB(db_type_, full_db_name, caffe2::db::READ));
+        CAFFE_ENFORCE(in_db.get(), "Cannot open db: ", full_db_name);
+        std::unique_ptr<Cursor> cursor(in_db->NewCursor());
+        extract(i, cursor.get(), &blob_states, &total_loaded_blobs);
+      }
+    }
+
+    validateBlobStates(blob_states);
+    // Loaded all the needed blobs.
+    if (load_all_ || total_loaded_blobs == OutputSize()) {
+      VLOG(1) << "Loaded " << total_loaded_blobs << " blobs fully from db(s)";
+      return true;
+    }
+
+    // Only loaded a subset of the blobs.
+    if (allow_incomplete_) {
+      VLOG(1) << "Loaded " << total_loaded_blobs << " blobs out of "
+              << OutputSize() << " blobs from db(s).";
+    } else {
+      for (const string& output_name : this->debug_def().output()) {
+        if (blob_states.count(output_name) == 0) {
+          LOG(ERROR) << "Failed to load blob: " << output_name;
+        }
+      }
+      CAFFE_THROW(
+          "Expected to load ",
+          OutputSize(),
+          " blobs, got ",
+          total_loaded_blobs,
+          " only.\n");
     }
 
     return true;
   }
 
  private:
-  void extract(Cursor* cursor) {
+  void extract(
+      int db_id,
+      Cursor* cursor,
+      std::unordered_map<string, BlobState>* blob_states,
+      int* total_loaded_blobs) {
     if (load_all_) {
-      extractAll(cursor);
+      extractAll(db_id, cursor, blob_states, total_loaded_blobs);
     } else {
-      extractFrom(cursor, OperatorBase::Outputs());
+      extractFrom(
+          db_id,
+          cursor,
+          OperatorBase::Outputs(),
+          blob_states,
+          total_loaded_blobs);
     }
   }
 
-  void extractAll(Cursor* cursor) {
+  void extractAll(
+      int db_id,
+      Cursor* cursor,
+      std::unordered_map<string, BlobState>* blob_states,
+      int* total_loaded_blobs) {
     CAFFE_ENFORCE(cursor, "cursor is not valid");
-    std::unordered_map<string, BlobState> blob_states;
     int loaded_blobs = 0;
     for (; cursor->Valid(); cursor->Next()) {
       const auto key = buildBlobNameFromDbKey(cursor->key());
+      if (key_to_dbid_.count(key) && key_to_dbid_[key] != db_id) {
+        CAFFE_THROW("Duplicate Key ", key, " is found!\n");
+      } else {
+        key_to_dbid_[key] = db_id;
+      }
+
       BlobProto proto;
       CAFFE_ENFORCE(
           proto.ParseFromString(cursor->value()), "Couldn't parse Proto");
@@ -150,24 +222,31 @@ class LoadOp final : public Operator<Context> {
         // proto, we will set the current device.
         SetCurrentDevice(&proto);
       }
-
       Blob* blob = ws_->CreateBlob(key);
-      ProcessBlob(blob, proto, &blob_states, key, &loaded_blobs);
+      ProcessBlob(blob, proto, blob_states, key, &loaded_blobs);
     }
-
-    VLOG(1) << "Loaded " << loaded_blobs << " from db";
-    validateBlobStates(blob_states);
+    *total_loaded_blobs += loaded_blobs;
   }
 
-  void extractFrom(Cursor* cursor, const vector<Blob*>& outputs) {
+  void extractFrom(
+      int db_id,
+      Cursor* cursor,
+      const vector<Blob*>& outputs,
+      std::unordered_map<string, BlobState>* blob_states,
+      int* total_loaded_blobs) {
     CAFFE_ENFORCE(cursor);
-    std::unordered_map<string, BlobState> blob_states;
     int loaded_blobs = 0;
     for (; cursor->Valid(); cursor->Next()) {
       const auto key = buildBlobNameFromDbKey(cursor->key());
       if (!output_indices_.count(key)) {
         VLOG(1) << "Key " << key << " not used. Skipping.";
       } else {
+        if (key_to_dbid_.count(key) && key_to_dbid_[key] != db_id) {
+          CAFFE_THROW("Duplicate Key ", key, " is found!\n");
+        } else {
+          key_to_dbid_[key] = db_id;
+        }
+
         VLOG(2) << "Deserializing blob " << key;
         BlobProto proto;
         CAFFE_ENFORCE(proto.ParseFromString(cursor->value()));
@@ -178,36 +257,15 @@ class LoadOp final : public Operator<Context> {
         }
         auto blobIndex = output_indices_[key];
         Blob* blob = outputs.at(blobIndex);
-        ProcessBlob(blob, proto, &blob_states, key, &loaded_blobs);
+        ProcessBlob(blob, proto, blob_states, key, &loaded_blobs);
 
-        if (loaded_blobs == OutputSize()) {
-          VLOG(1) << "Read all required blobs";
+        if (*total_loaded_blobs + loaded_blobs == OutputSize()) {
           break;
         }
       }
     }
 
-    validateBlobStates(blob_states);
-    VLOG(1) << "Fully loaded " << blob_states.size() << " blobs";
-
-    if (loaded_blobs != OutputSize()) {
-      if (allow_incomplete_ && loaded_blobs < OutputSize()) {
-        VLOG(1) << "Loaded " << loaded_blobs << " blobs out of " << OutputSize()
-                << " blobs from db.";
-        return;
-      }
-      for (const string& output_name : this->def().output()) {
-        if (blob_states.count(output_name) == 0) {
-          LOG(ERROR) << "Failed to load blob: " << output_name;
-        }
-      }
-      CAFFE_THROW(
-          "Expected to load ",
-          OutputSize(),
-          " blobs, got ",
-          loaded_blobs,
-          " only.\n");
-    }
+    *total_loaded_blobs += loaded_blobs;
   }
 
   string buildBlobNameFromDbKey(const string& dbKey) {
@@ -241,14 +299,44 @@ class LoadOp final : public Operator<Context> {
       blob->Reset();
     }
     blob->Deserialize(proto);
+    if (proto.has_content_num_chunks()) {
+      if (!blob_states.count(key)) {
+        blob_states[key] = BlobState(proto.content_num_chunks());
+      }
+      CAFFE_ENFORCE(
+          blob_states[key]
+              .seen_chunks_ids.insert(proto.content_chunk_id())
+              .second,
+          "Chunk with the same id has occured twice for: ",
+          key);
+      CAFFE_ENFORCE(
+          proto.content_chunk_id() >= 0 &&
+              proto.content_chunk_id() < blob_states[key].total_size,
+          "Chunk id has to be not less than 0 and "
+          "less than content_num_chunks for key: ",
+          key);
+      blob_states[key].current_size++;
+      CAFFE_ENFORCE(
+          !blob_states[key].is_tensor,
+          "Proto with content_chunks can not store tensor: ",
+          key);
+      CAFFE_ENFORCE(
+          blob_states[key].current_size <= blob_states[key].total_size,
+          "Found an extra part for an already filled blob: ",
+          key);
+      if (blob_states[key].current_size == blob_states[key].total_size) {
+        (*loaded_blobs)++;
+      }
+      return;
+    }
     if (!proto.has_tensor()) {
-      // Only tensors can be seen multiple times as chunks.
-      CAFFE_ENFORCE(blob_states.count(key) == 0, "Blob duplicated:", key);
+      // If blob is divided into chunks the field content_chunks has to be set,
+      // otherwise only tensors can be seen multiple times as chunks.
+      CAFFE_ENFORCE(blob_states.count(key) == 0, "Blob duplicated: ", key);
       blob_states[key] = BlobState();
       (*loaded_blobs)++;
       return;
     }
-
     CAFFE_ENFORCE(proto.has_tensor());
     if (blob_states.count(key)) {
       CAFFE_ENFORCE(blob_states[key].is_tensor, "Must be tensor ", key);
@@ -290,16 +378,14 @@ class LoadOp final : public Operator<Context> {
       const std::unordered_map<string, BlobState>& blob_states) {
     for (const auto& iter : blob_states) {
       const BlobState& blob_state = iter.second;
-      if (blob_state.is_tensor) {
-        CAFFE_ENFORCE(
-            blob_state.current_size == blob_state.total_size,
-            "Data size mismatch for blob ",
-            iter.first,
-            ". Expected: ",
-            blob_state.total_size,
-            " Read: ",
-            blob_state.current_size);
-      }
+      CAFFE_ENFORCE(
+          blob_state.current_size == blob_state.total_size,
+          "Data size mismatch for blob ",
+          iter.first,
+          ". Expected: ",
+          blob_state.total_size,
+          " Read: ",
+          blob_state.current_size);
     }
   }
 
@@ -308,11 +394,14 @@ class LoadOp final : public Operator<Context> {
   string add_prefix_;
   string strip_prefix_;
   string db_name_;
+  std::vector<std::string> db_names_;
   string db_type_;
   bool keep_device_;
   bool load_all_;
   bool allow_incomplete_;
   std::map<string, int> output_indices_;
+  std::map<string, int> key_to_dbid_;
+  std::vector<std::string> blob_names_;
 };
 
 template <class Context>
@@ -346,11 +435,15 @@ class SaveOp final : public Operator<Context> {
       for (int i = 0; i < blob_names_.size(); ++i) {
         std::string name;
         if (strip_prefix_.empty()) {
-          name = def().input(i);
+          name = operator_def.input(i);
         } else {
-          auto match_pos = def().input(i).find(strip_prefix_);
-          name = def().input(i).substr(
-              match_pos + strip_prefix_.size(), string::npos);
+          auto match_pos = operator_def.input(i).find(strip_prefix_);
+          if (match_pos == string::npos) {
+            name = operator_def.input(i);
+          } else {
+            name = operator_def.input(i).substr(
+                match_pos + strip_prefix_.size(), string::npos);
+          }
         }
         CAFFE_ENFORCE(
             input_names.insert(name).second, "Duplicated input: ", name);

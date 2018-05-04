@@ -2,12 +2,16 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-from caffe2.python import core
+
 from functools import partial
 from hypothesis import given
 
-import caffe2.python.hypothesis_test_util as hu
 import numpy as np
+import unittest
+import hypothesis.strategies as st
+
+from caffe2.python import core, workspace
+import caffe2.python.hypothesis_test_util as hu
 
 
 class TesterBase:
@@ -37,19 +41,22 @@ class TesterBase:
         ]
         return self.unsplit(data.shape[1:], segment_grads, segment_ids)
 
-    def _test(self, prefix, input_strategy, refs, **kwargs):
+    def _test(self, prefix, input_strategy, refs, gpu=False, **kwargs):
         tester = self
         operator_args = kwargs.pop('operator_args', {})
         threshold = kwargs.pop('threshold', 1e-4)
         grad_check = kwargs.pop('grad_check', True)
 
-        @given(X=input_strategy, **hu.gcs_cpu_only)
+        @given(X=input_strategy, **hu.gcs)
         def test_segment_ops(self, X, gc, dc):
+            if not gpu and gc.device_type > 0:
+                return
             for op_name, ref, grad_ref in refs:
                 inputs = ['input%d' % i for i in range(0, len(X))]
                 op = core.CreateOperator(
                     prefix + op_name, inputs, ['output'], **operator_args
                 )
+                print('Operator %s, ' % op.type, gc.device_type)
 
                 def seg_reduce(data, *args):
                     indices, segments = (
@@ -92,7 +99,6 @@ class TesterBase:
                     threshold=threshold,
                     **kwargs
                 )
-
         return test_segment_ops
 
 
@@ -216,6 +222,8 @@ def max_grad(grad_out, outputs, inputs):
     flat_grad_in = np.zeros(flat_inputs.shape)
     flat_grad_out = np.array(grad_out).flatten()
     blocks = inputs[0].shape[0]
+    if blocks == 0:
+        return np.zeros(inputs[0].shape)
     block_size = flat_inputs.shape[0] // blocks
 
     for i in range(block_size):
@@ -223,9 +231,9 @@ def max_grad(grad_out, outputs, inputs):
         out = flat_outputs[i]
         for j in range(blocks):
             idx = j * block_size + i
+            # we can produce multiple outputs for max
             if out == flat_inputs[idx]:
                 flat_grad_in[idx] = out_grad
-                break
 
     return np.resize(flat_grad_in, inputs[0].shape)
 
@@ -243,6 +251,45 @@ REFERENCES_SORTED = [
     ('RangeMean', mean, mean_grad),
     ('RangeMax', max_fwd, max_grad),
 ]
+
+REFERENCES_LENGTHS_ONLY = [
+    ('Max', partial(np.amax, axis=0), max_grad),
+]
+
+
+def sparse_lengths_weighted_sum_ref(D, W, I, L):
+    R = np.zeros(shape=(len(L), ) + D.shape[1:], dtype=D.dtype)
+    line = 0
+    for g in range(len(L)):
+        for _ in range(L[g]):
+            if len(D.shape) > 1:
+                R[g, :] += W[line] * D[I[line], :]
+            else:
+                R[g] += W[line] * D[I[line]]
+            line += 1
+    return [R]
+
+
+def sparse_lengths_weighted_sum_grad_ref(
+        GO, fwd_out, fwd_in, grad_on_weights=False):
+    D, W, I, L = fwd_in
+    GI = np.zeros(shape=(len(I), ) + D.shape[1:], dtype=D.dtype)
+    GW = np.zeros(shape=W.shape, dtype=W.dtype) if grad_on_weights else None
+    line = 0
+    for g in range(len(L)):
+        for _ in range(L[g]):
+            if len(GO.shape) > 1:
+                GI[line, :] = W[line] * GO[g, :]
+            else:
+                GI[line] = W[line] * GO[g]
+            if GW is not None:
+                if len(GO.shape) > 1:
+                    GW[line] = np.dot(GO[g].flatten(), D[I[line], :].flatten())
+                else:
+                    GW[line] = np.dot(GO[g].flatten(), D[I[line]].flatten())
+            line += 1
+    print(GW)
+    return [(GI, I), GW, None, None]
 
 
 class TestSegmentOps(hu.HypothesisTestCase):
@@ -265,7 +312,20 @@ class TestSegmentOps(hu.HypothesisTestCase):
                 is_sorted=False,
                 allow_empty=True
             ),
-            REFERENCES_ALL
+            REFERENCES_ALL,
+        )(self)
+
+    def test_unsorted_segment_ops_gpu(self):
+        SegmentsTester()._test(
+            'UnsortedSegment',
+            hu.segmented_tensor(
+                dtype=np.float32,
+                is_sorted=False,
+                allow_empty=True,
+            ),
+            REFERENCES_ALL,
+            gpu=workspace.has_gpu_support,
+            grad_check=False,
         )(self)
 
     def test_sparse_sorted_segment_ops(self):
@@ -296,23 +356,207 @@ class TestSegmentOps(hu.HypothesisTestCase):
             hu.lengths_tensor(
                 dtype=np.float32,
                 min_value=1,
-                max_value=10,
+                max_value=5,
                 allow_empty=True
             ),
-            REFERENCES_ALL
+            REFERENCES_ALL + REFERENCES_LENGTHS_ONLY,
         )(self)
 
     def test_sparse_lengths_ops(self):
-        LengthsTester()._test(
-            'SparseLengths',
-            hu.sparse_lengths_tensor(
-                dtype=np.float32,
-                min_value=1,
-                max_value=10,
-                allow_empty=True
-            ),
-            REFERENCES_ALL
-        )(self)
+        for itype in [np.int32, np.int64]:
+            LengthsTester()._test(
+                'SparseLengths',
+                hu.sparse_lengths_tensor(
+                    dtype=np.float32,
+                    min_value=1,
+                    max_value=5,
+                    allow_empty=True,
+                    itype=itype,
+                ),
+                REFERENCES_ALL,
+            )(self)
+
+    @unittest.skipIf(not workspace.has_gpu_support, "No gpu support")
+    @given(**hu.gcs)
+    def test_unsorted_sums_large(self, gc, dc):
+        X = np.random.rand(10000, 32, 12).astype(np.float32)
+        segments = np.random.randint(0, 10000, size=10000).astype(np.int32)
+        op = core.CreateOperator("UnsortedSegmentSum", ["X", "segments"], "out")
+        self.assertDeviceChecks(dc, op, [X, segments], [0])
+
+    @unittest.skipIf(not workspace.has_gpu_support, "No gpu support")
+    @given(**hu.gcs)
+    def test_sorted_segment_range_mean(self, gc, dc):
+        X = np.random.rand(6, 32, 12).astype(np.float32)
+        segments = np.array([0, 0, 1, 1, 2, 3]).astype(np.int32)
+        op = core.CreateOperator(
+            "SortedSegmentRangeMean",
+            ["X", "segments"],
+            "out"
+        )
+        self.assertDeviceChecks(dc, op, [X, segments], [0])
+        self.assertGradientChecks(gc, op, [X, segments], 0, [0])
+
+    @unittest.skipIf(not workspace.has_gpu_support, "No gpu support")
+    @given(**hu.gcs)
+    def test_sorted_segment_range_log_mean_exp(self, gc, dc):
+        X = np.random.rand(7, 32, 12).astype(np.float32)
+        segments = np.array([0, 0, 1, 1, 2, 2, 3]).astype(np.int32)
+        op = core.CreateOperator(
+            "SortedSegmentRangeLogMeanExp",
+            ["X", "segments"],
+            "out"
+        )
+        self.assertDeviceChecks(dc, op, [X, segments], [0])
+        self.assertGradientChecks(gc, op, [X, segments], 0, [0])
+
+    @unittest.skipIf(not workspace.has_gpu_support, "No gpu support")
+    @given(**hu.gcs)
+    def test_unsorted_means_large(self, gc, dc):
+        X = np.random.rand(10000, 31, 19).astype(np.float32)
+        segments = np.random.randint(0, 10000, size=10000).astype(np.int32)
+        op = core.CreateOperator("UnsortedSegmentMean", ["X", "segments"], "out")
+        self.assertDeviceChecks(dc, op, [X, segments], [0])
+
+    @given(
+        inputs=hu.lengths_tensor(
+            dtype=np.float32,
+            min_value=1,
+            max_value=5,
+            allow_empty=True,
+        ),
+        **hu.gcs
+    )
+    def test_lengths_sum(self, inputs, gc, dc):
+        X, Y = inputs
+        op = core.CreateOperator("LengthsSum", ["X", "Y"], "out")
+        self.assertDeviceChecks(dc, op, [X, Y], [0])
+        self.assertGradientChecks(gc, op, [X, Y], 0, [0])
+
+    @given(
+        inputs=hu.sparse_lengths_tensor(
+            dtype=np.float32,
+            min_value=1,
+            max_value=5,
+            allow_empty=True
+        ),
+        **hu.gcs
+    )
+    def test_sparse_lengths_sum(self, inputs, gc, dc):
+        X, Y, Z = inputs
+        op = core.CreateOperator("SparseLengthsSum", ["X", "Y", "Z"], "out")
+        self.assertDeviceChecks(dc, op, [X, Y, Z], [0])
+        self.assertGradientChecks(gc, op, [X, Y, Z], 0, [0])
+
+    @given(
+        grad_on_weights=st.booleans(),
+        inputs=hu.sparse_lengths_tensor(
+            dtype=np.float32,
+            min_value=1,
+            max_value=5,
+            allow_empty=True
+        ),
+        **hu.gcs
+    )
+    def test_sparse_lengths_weighted_sum(
+            self, grad_on_weights, inputs, gc, dc):
+        D, I, L = inputs
+        W = np.random.rand(I.size).astype(np.float32)
+        op = core.CreateOperator(
+            "SparseLengthsWeightedSum",
+            ["D", "W", "I", "L"],
+            "out",
+            grad_on_weights=grad_on_weights)
+        self.assertDeviceChecks(dc, op, [D, W, I, L], [0])
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=[D, W, I, L],
+            reference=sparse_lengths_weighted_sum_ref,
+            threshold=1e-4,
+            output_to_grad='out',
+            grad_reference=partial(
+                sparse_lengths_weighted_sum_grad_ref,
+                grad_on_weights=grad_on_weights),
+        )
+        self.assertGradientChecks(gc, op, [D, W, I, L], 0, [0])
+        if grad_on_weights:
+            self.assertGradientChecks(gc, op, [D, W, I, L], 1, [0])
+
+    @given(**hu.gcs)
+    def test_sparse_lengths_indices_in_gradient_sum_gpu(self, gc, dc):
+        X = np.random.rand(3, 3, 4, 5).astype(np.float32)
+        Y = np.asarray([3, 3, 2]).astype(np.int32)
+        Z = np.random.randint(0, 50, size=8).astype(np.int64)
+        op = core.CreateOperator(
+            "SparseLengthsIndicesInGradientSumGradient", ["X", "Y", "Z"], "out"
+        )
+        self.assertDeviceChecks(dc, op, [X, Y, Z], [0])
+
+    @given(**hu.gcs_cpu_only)
+    def test_legacy_sparse_and_lengths_sum_gradient(self, gc, dc):
+        X = np.random.rand(3, 64).astype(np.float32)
+        Y = np.asarray([20, 20, 10]).astype(np.int32)
+        workspace.FeedBlob("X", X)
+        workspace.FeedBlob("Y", Y)
+        test_net = core.Net("test_net")
+        test_net.SparseLengthsSumGradient(["X", "Y"], "out1")
+        test_net.LengthsSumGradient(["X", "Y"], "out2")
+        workspace.RunNetOnce(test_net)
+        out1 = workspace.FetchBlob("out1")
+        out2 = workspace.FetchBlob("out2")
+        self.assertTrue((out1 == out2).all())
+
+    @given(**hu.gcs)
+    def test_sparse_lengths_sum_invalid_index(self, gc, dc):
+        D = np.random.rand(50, 3, 4, 5).astype(np.float32)
+        I = (np.random.randint(0, 10000, size=10) + 10000).astype(np.int64)
+        L = np.asarray([4, 4, 2]).astype(np.int32)
+        op = core.CreateOperator(
+            "SparseLengthsSum",
+            ["D", "I", "L"],
+            "out")
+        workspace.FeedBlob('D', D)
+        workspace.FeedBlob('I', I)
+        workspace.FeedBlob('L', L)
+        with self.assertRaises(RuntimeError):
+            workspace.RunOperatorOnce(op)
+
+    @given(**hu.gcs_cpu_only)
+    def test_sparse_lengths_positional_weighted_sum(
+            self, gc, dc):
+        D = np.random.rand(50, 3, 4, 5).astype(np.float32)
+        W = np.random.rand(50).astype(np.float32)
+        indices = np.random.randint(0, 50, size=10).astype(np.int64)
+        L = np.asarray([4, 4, 2]).astype(np.int32)
+        op = core.CreateOperator(
+            "SparseLengthsPositionalWeightedSum",
+            ["D", "W", "indices", "L"],
+            "out")
+
+        def ref_sparse(D, W, indices, L):
+            workspace.FeedBlob("L", L)
+            lengths_range_fill_op = core.CreateOperator(
+                "LengthsRangeFill", ["L"], ["L_pos_seq"])
+            workspace.RunOperatorOnce(lengths_range_fill_op)
+
+            workspace.FeedBlob("W", W)
+            gather_op = core.CreateOperator(
+                "Gather", ["W", "L_pos_seq"], ["W_gathered"])
+            workspace.RunOperatorOnce(gather_op)
+
+            workspace.FeedBlob("D", D)
+            workspace.FeedBlob("indices", indices)
+            sparse_op = core.CreateOperator(
+                "SparseLengthsWeightedSum",
+                ["D", "W_gathered", "indices", "L"],
+                "out_ref")
+            workspace.RunOperatorOnce(sparse_op)
+
+            return (workspace.FetchBlob("out_ref"),)
+
+        self.assertReferenceChecks(
+            gc, op, [D, W, indices, L], ref_sparse)
 
 if __name__ == "__main__":
     import unittest
